@@ -1,11 +1,9 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"fmt"
-	"io"
+	"github.com/James-Mustamandi/llm-api-gateway/internal/proxy"
 	"log/slog"
 	"net/http"
 	"os"
@@ -14,40 +12,49 @@ import (
 	"time"
 )
 
-
 func main() {
 
 	// Setup structured logging
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	}))
 
 	slog.SetDefault(logger)
 
-	client := &http.Client {
+	upstreamKey := os.Getenv("OPENROUTER_API_KEY")
+	if upstreamKey == "" {
+		logger.Error("OPENROUTER_API_KEY not set")
+		os.Exit(1)
+	}
+
+	client := &http.Client{
 		Timeout: 60 * time.Second,
 	}
 
+	proxy := proxy.New(
+		client,
+		"https://openrouter.ai/api/v1/chat/completions",
+		upstreamKey,
+		logger,
+	)
 
 	mux := http.NewServeMux()
 
 	// Handlers
-	mux.HandleFunc("/healthz", func (w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("ok\n"))
 	})
 
-	mux.HandleFunc("/v1/chat/completions", chatHandler(client))
+	mux.HandleFunc("/v1/chat/completions", proxy.HandleChatCompletions)
 
-
-	server := &http.Server {
-		Addr: ":8080",
-		Handler: mux,
+	server := &http.Server{
+		Addr:              ":8080",
+		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout: 30 * time.Second,
-		WriteTimeout: 0,
-		IdleTimeout: 120 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      0,
+		IdleTimeout:       120 * time.Second,
 	}
-
 
 	serverError := make(chan error, 1)
 
@@ -62,14 +69,14 @@ func main() {
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 
 	select {
-		case err := <-serverError:
-			slog.Error("server failed", "err", err)
-			os.Exit(1)
-		case sig := <-stop:
-			slog.Info("Shutting down", "Signal", sig.String())
+	case err := <-serverError:
+		slog.Error("server failed", "err", err)
+		os.Exit(1)
+	case sig := <-stop:
+		slog.Info("Shutting down", "Signal", sig.String())
 
 	}
-	shutdownContext, cancel := context.WithTimeout(context.Background(), 30 * time.Second)
+	shutdownContext, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	if err := server.Shutdown(shutdownContext); err != nil {
@@ -78,55 +85,3 @@ func main() {
 	}
 	slog.Info("Shut down cleanly")
 }
-
-
-func chatHandler(client *http.Client) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			http.Error(w, "Failed to read request body", http.StatusBadRequest)
-		}
-		defer r.Body.Close()
-
-		// Outbound request to provider
-		upstreamURL := "https://openrouter.ai/api/v1/chat/completions"
-		outReq, err := http.NewRequestWithContext(
-			r.Context(),
-			http.MethodPost,
-			upstreamURL,
-			bytes.NewReader(body),
-		)
-
-		if err != nil {
-			http.Error(w, "Failed to build upstream request", http.StatusInternalServerError)
-			return
-		}
-
-		// Headers for provider
-		outReq.Header.Set("Content-Type", "application/json")
-		outReq.Header.Set("Authorization", "Bearer "+os.Getenv("OPENROUTER_API_KEY"))
-		
-		// Send the request
-		start := time.Now()
-		resp, err := client.Do(outReq)
-		if err != nil {
-			slog.Error("Upstream request failed", "err", err)
-			http.Error(w, "upstream request failed", http.StatusBadGateway)
-			return
-		}
-		defer resp.Body.Close()
-
-		// Copy upstream status and body back to client
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(resp.StatusCode)
-		written, _ := io.Copy(w, resp.Body)
-
-		slog.Info("proxied request", 
-			"upstream_status", resp.StatusCode,
-			"resp_bytes", written,
-			"latency_ms", time.Since(start).Milliseconds(),
-		)
-	}
-}
-
