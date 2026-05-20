@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -13,16 +16,28 @@ import (
 
 
 func main() {
+
+	// Setup structured logging
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions {
 		Level: slog.LevelInfo,
 	}))
 
 	slog.SetDefault(logger)
 
+	client := &http.Client {
+		Timeout: 60 * time.Second,
+	}
+
+
 	mux := http.NewServeMux()
+
+	// Handlers
 	mux.HandleFunc("/healthz", func (w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("ok\n"))
 	})
+
+	mux.HandleFunc("/v1/chat/completions", chatHandler(client))
+
 
 	server := &http.Server {
 		Addr: ":8080",
@@ -63,3 +78,55 @@ func main() {
 	}
 	slog.Info("Shut down cleanly")
 }
+
+
+func chatHandler(client *http.Client) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "Failed to read request body", http.StatusBadRequest)
+		}
+		defer r.Body.Close()
+
+		// Outbound request to provider
+		upstreamURL := "https://openrouter.ai/api/v1/chat/completions"
+		outReq, err := http.NewRequestWithContext(
+			r.Context(),
+			http.MethodPost,
+			upstreamURL,
+			bytes.NewReader(body),
+		)
+
+		if err != nil {
+			http.Error(w, "Failed to build upstream request", http.StatusInternalServerError)
+			return
+		}
+
+		// Headers for provider
+		outReq.Header.Set("Content-Type", "application/json")
+		outReq.Header.Set("Authorization", "Bearer "+os.Getenv("OPENROUTER_API_KEY"))
+		
+		// Send the request
+		start := time.Now()
+		resp, err := client.Do(outReq)
+		if err != nil {
+			slog.Error("Upstream request failed", "err", err)
+			http.Error(w, "upstream request failed", http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+
+		// Copy upstream status and body back to client
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(resp.StatusCode)
+		written, _ := io.Copy(w, resp.Body)
+
+		slog.Info("proxied request", 
+			"upstream_status", resp.StatusCode,
+			"resp_bytes", written,
+			"latency_ms", time.Since(start).Milliseconds(),
+		)
+	}
+}
+
