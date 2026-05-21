@@ -26,7 +26,7 @@ func copyHeaders(dest, src http.Header) {
 			}
 		}
 	}
-
+	
 	for name, values := range src {
 		canonical := http.CanonicalHeaderKey(name)
 		if hopByHopHeaders[canonical] || connectionHeaders[canonical] {
