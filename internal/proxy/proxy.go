@@ -34,52 +34,52 @@ func New(client *http.Client, upstreamURL, upstreamKey string, logger *slog.Logg
 }
 
 
-func (p *Proxy) HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(r.Body)
+func (proxy *Proxy) HandleChatCompletions(writer http.ResponseWriter, response *http.Request) {
+	body, err := io.ReadAll(response.Body)
 
 	if err != nil {
-		http.Error(w, "failed to read request body", http.StatusBadRequest)
+		http.Error(writer, "failed to read request body", http.StatusBadRequest)
 	}
-	defer r.Body.Close()
+	defer response.Body.Close()
 
-	var sr streamRequest
-	_ = json.Unmarshal(body, &sr)
+	var streamReq streamRequest
+	_ = json.Unmarshal(body, &streamReq)
 
-	outReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, p.upstreamURL, bytes.NewReader(body))
+	outReq, err := http.NewRequestWithContext(response.Context(), http.MethodPost, proxy.upstreamURL, bytes.NewReader(body))
 	if err != nil {
-		http.Error(w, "Failed to build upstream request", http.StatusInternalServerError)
+		http.Error(writer, "Failed to build upstream request", http.StatusInternalServerError)
 		return
 	}
 
-	copyHeaders(outReq.Header, r.Header)
-	outReq.Header.Set("Authorization", "Bearer "+p.upstreamKey)
+	copyHeaders(outReq.Header, response.Header)
+	outReq.Header.Set("Authorization", "Bearer "+proxy.upstreamKey)
 	if outReq.Header.Get("Content-Type") == "" {
 		outReq.Header.Set("Content-Type", "application/json")
 	}
 
 	start := time.Now()
-	resp, err := p.client.Do(outReq)
+	resp, err := proxy.client.Do(outReq)
 
 	if err != nil {
 
 		if errors.Is(err, context.Canceled) {
-			p.logger.Info("Client disconnected before upstream responded")
+			proxy.logger.Info("Client disconnected before upstream responded")
 		}
 
-		p.logger.Error("upstream request failed", "err", err)
-		http.Error(w, "upstream request failed", http.StatusBadGateway)
+		proxy.logger.Error("upstream request failed", "err", err)
+		http.Error(writer, "upstream request failed", http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
 
-	copyHeaders(w.Header(), resp.Header)
-	w.WriteHeader(resp.StatusCode)
+	copyHeaders(writer.Header(), resp.Header)
+	writer.WriteHeader(resp.StatusCode)
 
 	var written int64
-	if sr.Stream {
-		written, err = p.streamCopy(r.Context(), w, resp.Body)
+	if streamReq.Stream {
+		written, err = proxy.streamCopy(response.Context(), writer, resp.Body)
 	} else {
-		written, err = io.Copy(w, resp.Body)
+		written, err = io.Copy(writer, resp.Body)
 	}
 
 	logLevel := slog.LevelInfo
@@ -87,8 +87,8 @@ func (p *Proxy) HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		logLevel = slog.LevelWarn
 	}
 
-	p.logger.Log(r.Context(), logLevel, "proxied request",
-		"stream", sr.Stream,
+	proxy.logger.Log(response.Context(), logLevel, "proxied request",
+		"stream", streamReq.Stream,
 		"upstream_status", resp.StatusCode,
 		"resp_bytes", written,
 		"latency_ms", time.Since(start).Milliseconds(),
@@ -96,10 +96,10 @@ func (p *Proxy) HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	)
 }
 
-func (p *Proxy) streamCopy(ctx context.Context, w http.ResponseWriter, body io.Reader) (int64, error) {
-	flusher, canFlush := w.(http.Flusher)
+func (proxy *Proxy) streamCopy(ctx context.Context, writer http.ResponseWriter, body io.Reader) (int64, error) {
+	flusher, canFlush := writer.(http.Flusher)
 	if !canFlush {
-		return io.Copy(w, body)
+		return io.Copy(writer, body)
 	}
 
 	bytesInKB := 1024
@@ -116,7 +116,7 @@ func (p *Proxy) streamCopy(ctx context.Context, w http.ResponseWriter, body io.R
 
 		n, readErr := body.Read(buffer)
 		if n > 0 {
-			written, writeErr := w.Write(buffer[:n])
+			written, writeErr := writer.Write(buffer[:n])
 			total += int64(written)
 			if writeErr != nil {
 				return total, writeErr
