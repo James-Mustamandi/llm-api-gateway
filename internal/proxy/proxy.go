@@ -12,12 +12,14 @@ import (
 	"time"
 
 	"github.com/James-Mustamandi/llm-api-gateway/internal/provider"
+	"github.com/James-Mustamandi/llm-api-gateway/internal/ratelimit"
 )
 
 type Proxy struct {
 	client      *http.Client
 	registry 	*provider.Registry
-	logger      *slog.Logger
+	limiter		*ratelimit.Limiter
+	logger 		*slog.Logger
 }
 
 
@@ -25,11 +27,13 @@ type streamRequest struct {
 	Stream bool `json:"stream"`
 }
 
+const usageTailBytes = 8192
 
-func New(client *http.Client, registry *provider.Registry, logger *slog.Logger) *Proxy {
+func New(client *http.Client, registry *provider.Registry, limiter *ratelimit.Limiter, logger *slog.Logger) *Proxy {
 	return &Proxy{
 		client:		client,
-		registry:	registry,	
+		registry:	registry,
+		limiter:	limiter,	
 		logger:		logger,
 	}
 }
@@ -42,6 +46,16 @@ func (proxy *Proxy) HandleChatCompletions(writer http.ResponseWriter, request *h
 		http.Error(writer, "failed to read request body", http.StatusBadRequest)
 	}
 	defer request.Body.Close()
+
+	key := clientKey(request)
+	if !proxy.limiter.Allow(key, 0) {
+		proxy.logger.Warn("Rate limited", "key", key, "balance", proxy.limiter.CreditsAvailable(key))
+		writer.Header().Set("Content-Type", "application/json")
+		writer.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(writer, `{"error":{"message":rate limit exceeded", "type":"rate_limit_error"}}`)
+		return
+	}
+
 
 	var streamReq streamRequest
 	_ = json.Unmarshal(body, &streamReq)
@@ -94,9 +108,18 @@ func (proxy *Proxy) HandleChatCompletions(writer http.ResponseWriter, request *h
 
 		var written int64
 		if streamReq.Stream {
-			written, err = proxy.streamCopy(request.Context(), writer, upstreamResponse.Body)
+			written, err = proxy.streamCopy(request.Context(), writer, upstreamResponse.Body, key)
 		} else {
-			written, err = io.Copy(writer, upstreamResponse.Body)
+			respBody, readErr := io.ReadAll(upstreamResponse.Body)
+			if readErr != nil {
+				err = readErr
+			} else {
+				written, err = io.Copy(writer, bytes.NewReader(respBody))
+				tokens := parseUsageTokens(respBody)
+				if tokens > 0 {
+					proxy.limiter.Charge(key, float64(tokens))
+				}
+			}
 		}
 
 		logLevel := slog.LevelInfo
@@ -119,23 +142,30 @@ func (proxy *Proxy) HandleChatCompletions(writer http.ResponseWriter, request *h
 	http.Error(writer, "All upstream providers failed", http.StatusBadGateway)
 }
 
-func (proxy *Proxy) streamCopy(ctx context.Context, writer http.ResponseWriter, body io.Reader) (int64, error) {
+func (proxy *Proxy) streamCopy(ctx context.Context, writer http.ResponseWriter, body io.Reader, key string) (int64, error) {
 	flusher, canFlush := writer.(http.Flusher)
 	if !canFlush {
 		return io.Copy(writer, body)
 	}
 
+
+	tail := make([]byte, 0, usageTailBytes * 2)
 	bytesInKB := 1024
 	totalBufferKB := 4
 	buffer := make([]byte, bytesInKB * totalBufferKB)
 	var total int64
-	for {
+	var copyErr error
 
+	for {
 		select {
 		case <-ctx.Done():
 			return total, ctx.Err()
 		default:
 		}
+		if copyErr != nil {
+			break
+		}
+
 
 		n, readErr := body.Read(buffer)
 		if n > 0 {
@@ -145,12 +175,24 @@ func (proxy *Proxy) streamCopy(ctx context.Context, writer http.ResponseWriter, 
 				return total, writeErr
 			}
 			flusher.Flush()
+
+			tail = append(tail, buffer[:n]...)
+			if len(tail) > 2 * usageTailBytes {
+				tail = tail[len(tail)-usageTailBytes:]
+			}
+
 		}
+
 		if readErr == io.EOF {
-			return total, nil
+			break
 		}
 		if readErr != nil {
-			return total, readErr
+			copyErr = readErr
+			break
 		}
 	}
+	if tokens := parseUsageTokens(tail); tokens > 0 {
+		proxy.limiter.Charge(key, float64(tokens))
+	}
+	return total, copyErr
 }

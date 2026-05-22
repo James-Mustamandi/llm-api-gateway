@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/James-Mustamandi/llm-api-gateway/internal/provider"
+	"github.com/James-Mustamandi/llm-api-gateway/internal/ratelimit"
 )
 
 func TestFailoverToHealthyProvider(t *testing.T) {
@@ -34,7 +35,10 @@ func TestFailoverToHealthyProvider(t *testing.T) {
 		provider.NewOpenAICompatible("working", working.URL, "k", nil),
 	)
 
-	proxy := New(&http.Client{Timeout: 5 * time.Second}, registry, slog.Default())
+	limiter := ratelimit.New(ratelimit.Config{Capacity: 1_000_000, RefillPerSecond: 1_000_000})
+
+
+	proxy := New(&http.Client{Timeout: 5 * time.Second}, registry, limiter, slog.Default())
 	gateway := httptest.NewServer(http.HandlerFunc(proxy.HandleChatCompletions))
 	defer gateway.Close()
 
@@ -82,7 +86,9 @@ func TestNoFailoverOnClientError(t *testing.T) {
 		provider.NewOpenAICompatible("second", second.URL, "k", nil),
 	)
 
-	proxy := New(&http.Client{Timeout: 5 * time.Second}, registry, slog.Default())
+	limiter := ratelimit.New(ratelimit.Config{Capacity: 1_000_000, RefillPerSecond: 1_000_000})
+
+	proxy := New(&http.Client{Timeout: 5 * time.Second}, registry, limiter, slog.Default())
 	gateway := httptest.NewServer(http.HandlerFunc(proxy.HandleChatCompletions))
 	defer gateway.Close()
 

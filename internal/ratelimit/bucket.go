@@ -54,7 +54,7 @@ func (bucket *bucket) consume(cost float64, now time.Time) {
 	bucket.mutex.Lock()
 	defer bucket.mutex.Unlock()
 	bucket.refillLocked(now)
-	bucket.capacity -= cost
+	bucket.credits -= cost
 }
 
 

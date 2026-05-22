@@ -48,7 +48,7 @@ func (limiter *Limiter) Charge(key string, cost float64) {
 	bucket.consume(cost, limiter.now())
 }
 
-func (limiter *Limiter) creditsAvailable(key string) float64{
+func (limiter *Limiter) CreditsAvailable(key string) float64 {
 	bucket := limiter.getBucket(key)
 	return bucket.creditsAvailable(limiter.now())
 }

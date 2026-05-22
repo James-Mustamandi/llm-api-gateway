@@ -12,6 +12,7 @@ import (
 
 	"github.com/James-Mustamandi/llm-api-gateway/internal/provider"
 	"github.com/James-Mustamandi/llm-api-gateway/internal/proxy"
+	"github.com/James-Mustamandi/llm-api-gateway/internal/ratelimit"
 )
 
 func main() {
@@ -46,9 +47,15 @@ func main() {
 
 	registry := provider.NewRegistry(openrouter)
 
+	limiter := ratelimit.New(ratelimit.Config{
+		Capacity: 1_000_000,
+		RefillPerSecond: 1_000_000,
+	})
+
 	proxy := proxy.New(
 		client,
 		registry,
+		limiter,
 		logger,
 	)
 

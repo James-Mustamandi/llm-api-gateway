@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/James-Mustamandi/llm-api-gateway/internal/provider"
+	"github.com/James-Mustamandi/llm-api-gateway/internal/ratelimit"
 )
 
 func slowStreamUpstream(eventCount int, delay time.Duration) http.HandlerFunc {
@@ -37,7 +38,9 @@ func TestStreamingDisconnect(t *testing.T) {
 		provider.NewOpenAICompatible("fake", upstream.URL, "fake-key", nil),
 	)
 
-	p := New(upstream.Client(), registry, slog.Default())
+	limiter := ratelimit.New(ratelimit.Config{Capacity: 100, RefillPerSecond: 100})
+
+	p := New(upstream.Client(), registry, limiter, slog.Default())
 
 	gateway := httptest.NewServer(http.HandlerFunc(p.HandleChatCompletions))
 	defer gateway.Close()
