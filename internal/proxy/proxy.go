@@ -2,19 +2,21 @@ package proxy
 
 import (
 	"bytes"
-	"encoding/json"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/James-Mustamandi/llm-api-gateway/internal/provider"
 )
 
 type Proxy struct {
 	client      *http.Client
-	upstreamURL string
-	upstreamKey string
+	registry 	*provider.Registry
 	logger      *slog.Logger
 }
 
@@ -24,76 +26,97 @@ type streamRequest struct {
 }
 
 
-func New(client *http.Client, upstreamURL, upstreamKey string, logger *slog.Logger) *Proxy {
+func New(client *http.Client, registry *provider.Registry, logger *slog.Logger) *Proxy {
 	return &Proxy{
-		client:      client,
-		upstreamURL: upstreamURL,
-		upstreamKey: upstreamKey,
-		logger:      logger,
+		client:		client,
+		registry:	registry,	
+		logger:		logger,
 	}
 }
 
 
-func (proxy *Proxy) HandleChatCompletions(writer http.ResponseWriter, response *http.Request) {
-	body, err := io.ReadAll(response.Body)
+func (proxy *Proxy) HandleChatCompletions(writer http.ResponseWriter, request *http.Request) {
+	body, err := io.ReadAll(request.Body)
 
 	if err != nil {
 		http.Error(writer, "failed to read request body", http.StatusBadRequest)
 	}
-	defer response.Body.Close()
+	defer request.Body.Close()
 
 	var streamReq streamRequest
 	_ = json.Unmarshal(body, &streamReq)
 
-	outReq, err := http.NewRequestWithContext(response.Context(), http.MethodPost, proxy.upstreamURL, bytes.NewReader(body))
-	if err != nil {
-		http.Error(writer, "Failed to build upstream request", http.StatusInternalServerError)
+	providers := proxy.registry.Providers()
+	if len(providers) == 0 {
+		http.Error(writer, "No providers configured", http.StatusInternalServerError)
 		return
 	}
-
-	copyHeaders(outReq.Header, response.Header)
-	outReq.Header.Set("Authorization", "Bearer "+proxy.upstreamKey)
-	if outReq.Header.Get("Content-Type") == "" {
-		outReq.Header.Set("Content-Type", "application/json")
-	}
-
+	
 	start := time.Now()
-	resp, err := proxy.client.Do(outReq)
+	var lastError error
 
-	if err != nil {
-
-		if errors.Is(err, context.Canceled) {
-			proxy.logger.Info("Client disconnected before upstream responded")
+	for i, provider := range providers {
+		outReq, err := http.NewRequestWithContext(request.Context(), http.MethodPost, provider.Endpoint(request.URL.Path), bytes.NewReader(body))
+		if err != nil {
+			lastError = fmt.Errorf("Building request for %s: %w", provider.Name(), err)
+			continue
 		}
 
-		proxy.logger.Error("upstream request failed", "err", err)
-		http.Error(writer, "upstream request failed", http.StatusBadGateway)
+		copyHeaders(outReq.Header, request.Header)
+		provider.Authorize(outReq)
+		if outReq.Header.Get("Content-Type") == "" {
+			outReq.Header.Set("Content-Type", "application/json")
+		}
+
+		upstreamResponse, err := proxy.client.Do(outReq)
+		if err != nil {
+
+			if errors.Is(err, context.Canceled) {
+				proxy.logger.Info("Client disconnected before upstream responded", "provider", provider.Name())
+			}
+			lastError = fmt.Errorf("%s request failed: %w", provider.Name(), err)
+			proxy.logger.Warn("provider failed, trying next", "provider", provider.Name(), "attempt", i + 1, "err", err)
+			continue
+		}
+
+		if shouldFailover(upstreamResponse.StatusCode) && i < len(providers) - 1 {
+			upstreamResponse.Body.Close()
+			lastError = fmt.Errorf("%s returned status %d", provider.Name(), upstreamResponse.StatusCode)
+			proxy.logger.Warn("provider returned retryable status, trying next", "provider", provider.Name(), "status", upstreamResponse.StatusCode, "attempt", i + 1)
+			continue
+		}
+
+		defer upstreamResponse.Body.Close()
+
+		copyHeaders(writer.Header(), upstreamResponse.Header)
+		writer.Header().Set("X-Gateway-Provider", provider.Name())
+		writer.WriteHeader(upstreamResponse.StatusCode)
+
+		var written int64
+		if streamReq.Stream {
+			written, err = proxy.streamCopy(request.Context(), writer, upstreamResponse.Body)
+		} else {
+			written, err = io.Copy(writer, upstreamResponse.Body)
+		}
+
+		logLevel := slog.LevelInfo
+		if err != nil {
+			logLevel = slog.LevelWarn
+		}
+
+		proxy.logger.Log(request.Context(), logLevel, "proxied request",
+			"provider", provider.Name(),
+			"stream", streamReq.Stream,
+			"upstream_status", upstreamResponse.StatusCode,
+			"resp_bytes", written,
+			"attempts", i + 1,
+			"latency_ms", time.Since(start).Milliseconds(),
+			"err", err,
+		)
 		return
 	}
-	defer resp.Body.Close()
-
-	copyHeaders(writer.Header(), resp.Header)
-	writer.WriteHeader(resp.StatusCode)
-
-	var written int64
-	if streamReq.Stream {
-		written, err = proxy.streamCopy(response.Context(), writer, resp.Body)
-	} else {
-		written, err = io.Copy(writer, resp.Body)
-	}
-
-	logLevel := slog.LevelInfo
-	if err != nil {
-		logLevel = slog.LevelWarn
-	}
-
-	proxy.logger.Log(response.Context(), logLevel, "proxied request",
-		"stream", streamReq.Stream,
-		"upstream_status", resp.StatusCode,
-		"resp_bytes", written,
-		"latency_ms", time.Since(start).Milliseconds(),
-		"err", err,
-	)
+	proxy.logger.Error("All providers failed", "err", lastError, "Number of providers", len(providers))
+	http.Error(writer, "All upstream providers failed", http.StatusBadGateway)
 }
 
 func (proxy *Proxy) streamCopy(ctx context.Context, writer http.ResponseWriter, body io.Reader) (int64, error) {

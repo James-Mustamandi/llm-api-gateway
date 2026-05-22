@@ -3,13 +3,15 @@ package main
 import (
 	"context"
 	"errors"
-	"github.com/James-Mustamandi/llm-api-gateway/internal/proxy"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/James-Mustamandi/llm-api-gateway/internal/provider"
+	"github.com/James-Mustamandi/llm-api-gateway/internal/proxy"
 )
 
 func main() {
@@ -31,10 +33,22 @@ func main() {
 		Timeout: 60 * time.Second,
 	}
 
+	openrouter := provider.NewOpenAICompatible(
+		"openrouter",
+		"https://openrouter.ai/api/v1",
+		upstreamKey,
+		map[string]string {
+			"HTTP-Referer": "https://github.com/James-Mustamandi/llm-api-gateway",
+			"X-Title":		"llm-api-gateway",
+		},
+	)
+
+
+	registry := provider.NewRegistry(openrouter)
+
 	proxy := proxy.New(
 		client,
-		"https://openrouter.ai/api/v1/chat/completions",
-		upstreamKey,
+		registry,
 		logger,
 	)
 

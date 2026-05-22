@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/James-Mustamandi/llm-api-gateway/internal/provider"
 )
 
 func slowStreamUpstream(eventCount int, delay time.Duration) http.HandlerFunc {
@@ -29,9 +31,13 @@ func slowStreamUpstream(eventCount int, delay time.Duration) http.HandlerFunc {
 
 func TestStreamingDisconnect(t *testing.T) {
 	upstream := httptest.NewServer(slowStreamUpstream(100, 50 * time.Millisecond))
-	defer upstream.Close()
+	defer upstream.Close()	
 
-	p := New(upstream.Client(), upstream.URL, "example_key", slog.Default())
+	registry := provider.NewRegistry(
+		provider.NewOpenAICompatible("fake", upstream.URL, "fake-key", nil),
+	)
+
+	p := New(upstream.Client(), registry, slog.Default())
 
 	gateway := httptest.NewServer(http.HandlerFunc(p.HandleChatCompletions))
 	defer gateway.Close()
