@@ -132,6 +132,7 @@ func (proxy *Proxy) HandleChatCompletions(writer http.ResponseWriter, request *h
 			"stream", streamReq.Stream,
 			"upstream_status", upstreamResponse.StatusCode,
 			"resp_bytes", written,
+			"credits_available", proxy.limiter.CreditsAvailable(key),
 			"attempts", i + 1,
 			"latency_ms", time.Since(start).Milliseconds(),
 			"err", err,
