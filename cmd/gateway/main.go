@@ -11,13 +11,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/James-Mustamandi/llm-api-gateway/internal/health"
 	"github.com/James-Mustamandi/llm-api-gateway/internal/keystore"
+	"github.com/James-Mustamandi/llm-api-gateway/internal/metrics"
 	"github.com/James-Mustamandi/llm-api-gateway/internal/provider"
 	"github.com/James-Mustamandi/llm-api-gateway/internal/proxy"
 	"github.com/James-Mustamandi/llm-api-gateway/internal/ratelimit"
 	"github.com/James-Mustamandi/llm-api-gateway/internal/secrets"
-	"github.com/James-Mustamandi/llm-api-gateway/internal/health"
-
 )
 
 func main() {
@@ -87,6 +87,9 @@ func main() {
 	trackerTimeout := 5.0 * time.Second
 	tracker := health.NewTracker(failureThresholdRetries, trackerTimeout)
 
+	counters := metrics.New()
+	metricsHandler := metrics.NewHandler(counters, tracker)
+
 	proxy := proxy.New(
 		client,
 		registry,
@@ -94,6 +97,7 @@ func main() {
 		logger,
 		store,
 		tracker,
+		counters,
 	)
 
 	mux := http.NewServeMux()
@@ -104,6 +108,9 @@ func main() {
 	})
 
 	mux.HandleFunc("/v1/chat/completions", proxy.HandleChatCompletions)
+
+	mux.HandleFunc("/metrics", metricsHandler.Prometheus)
+	mux.HandleFunc("/stats", metricsHandler.JSON)
 
 	server := &http.Server{
 		Addr:              ":8080",

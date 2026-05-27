@@ -16,6 +16,8 @@ import (
 	"github.com/James-Mustamandi/llm-api-gateway/internal/keystore"
 	"github.com/James-Mustamandi/llm-api-gateway/internal/secrets"
 	"github.com/James-Mustamandi/llm-api-gateway/internal/health"
+	"github.com/James-Mustamandi/llm-api-gateway/internal/metrics"
+
 )
 
 func slowStreamUpstream(eventCount int, delay time.Duration) http.HandlerFunc {
@@ -55,8 +57,9 @@ func TestStreamingDisconnect(t *testing.T) {
 	failureThresholdRetries := 5
 	trackerTimeout := 5.0 * time.Second
 	tracker := health.NewTracker(failureThresholdRetries, trackerTimeout)
+	counters := metrics.New()
 
-	proxy := New(upstream.Client(), registry, limiter, slog.Default(), store, tracker)
+	proxy := New(upstream.Client(), registry, limiter, slog.Default(), store, tracker, counters)
 
 	gateway := httptest.NewServer(http.HandlerFunc(proxy.HandleChatCompletions))
 	defer gateway.Close()

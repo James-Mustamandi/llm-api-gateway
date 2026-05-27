@@ -11,10 +11,11 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/James-Mustamandi/llm-api-gateway/internal/health"
 	"github.com/James-Mustamandi/llm-api-gateway/internal/keystore"
 	"github.com/James-Mustamandi/llm-api-gateway/internal/provider"
 	"github.com/James-Mustamandi/llm-api-gateway/internal/ratelimit"
-	"github.com/James-Mustamandi/llm-api-gateway/internal/health"
+	"github.com/James-Mustamandi/llm-api-gateway/internal/metrics"
 )
 
 type Proxy struct {
@@ -24,6 +25,7 @@ type Proxy struct {
 	logger 		*slog.Logger
 	keystore 	keystore.Store
 	tracker 	*health.Tracker
+	counters 	*metrics.Counters
 }
 
 
@@ -33,19 +35,22 @@ type streamRequest struct {
 
 const usageTailBytes = 8192
 
-func New(client *http.Client, registry *provider.Registry, limiter *ratelimit.Limiter, logger *slog.Logger, keystore keystore.Store, tracker *health.Tracker) *Proxy {
+func New(client *http.Client, registry *provider.Registry, limiter *ratelimit.Limiter, logger *slog.Logger, keystore keystore.Store, tracker *health.Tracker, counters *metrics.Counters) *Proxy {
 	return &Proxy{
 		client:		client,
 		registry:	registry,
 		limiter:	limiter,	
 		logger:		logger,
 		keystore: 	keystore,
-		tracker: tracker,
+		tracker: 	tracker,
+		counters: 	counters,
 	}
 }
 
 
 func (proxy *Proxy) HandleChatCompletions(writer http.ResponseWriter, request *http.Request) {
+	proxy.counters.IncRequests()
+
 	body, err := io.ReadAll(request.Body)
 
 	if err != nil {
@@ -53,9 +58,14 @@ func (proxy *Proxy) HandleChatCompletions(writer http.ResponseWriter, request *h
 	}
 	defer request.Body.Close()
 
+	requestId := newRequestID()
+	writer.Header().Set("X-Gateway-Request-Id", requestId)
+	logger := proxy.logger.With("request_id", requestId)
+
 	key := clientKey(request)
 	if !proxy.limiter.Allow(key, 0) {
-		proxy.logger.Warn("Rate limited", "key", key, "balance", proxy.limiter.CreditsAvailable(key))
+		proxy.counters.IncRateLimited()
+		logger.Warn("Rate limited", "key", key, "balance", proxy.limiter.CreditsAvailable(key))
 		writer.Header().Set("Content-Type", "application/json")
 		writer.WriteHeader(http.StatusTooManyRequests)
 		_, _ = io.WriteString(writer, `{"error":{"message":rate limit exceeded", "type":"rate_limit_error"}}`)
@@ -79,7 +89,7 @@ func (proxy *Proxy) HandleChatCompletions(writer http.ResponseWriter, request *h
 
 		// skip providers whose breaker is open
 		if !proxy.tracker.Allow(provider.Name()) {
-			proxy.logger.Info("skipping provider (circuit is open)", "provider", provider.Name())
+			logger.Info("skipping provider (circuit is open)", "provider", provider.Name())
 			lastError = fmt.Errorf("%s: circuit open", provider.Name())
 			continue
 		}
@@ -95,12 +105,12 @@ func (proxy *Proxy) HandleChatCompletions(writer http.ResponseWriter, request *h
 		if errors.Is(err, keystore.ErrorNotFound) {
 			vendorKey = provider.FallbackKey()
 		} else if err != nil {
-			proxy.logger.Warn("keystore error, using fallback", "provider", provider.Name(), "err", err)
+			logger.Warn("keystore error, using fallback", "provider", provider.Name(), "err", err)
 			vendorKey = provider.FallbackKey()
 		}
 		if vendorKey == "" {
 			lastError = fmt.Errorf("%s: no vendor key available for client", provider.Name())
-			proxy.logger.Warn("no vendor key, trying next provider", "provider", provider.Name())
+			logger.Warn("no vendor key, trying next provider", "provider", provider.Name())
 			continue
 		}
 
@@ -114,19 +124,21 @@ func (proxy *Proxy) HandleChatCompletions(writer http.ResponseWriter, request *h
 		upstreamResponse, err := proxy.client.Do(outReq)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
-				proxy.logger.Info("Client disconnected before upstream responded", "provider", provider.Name())
+				logger.Info("Client disconnected before upstream responded", "provider", provider.Name())
 			}
 			proxy.tracker.RecordFailure(provider.Name())
+			proxy.counters.IncProviderFailure(provider.Name())
 			lastError = fmt.Errorf("%s request failed: %w", provider.Name(), err)
-			proxy.logger.Warn("provider failed, trying next", "provider", provider.Name(), "attempt", i + 1, "err", err)
+			logger.Warn("provider failed, trying next", "provider", provider.Name(), "attempt", i + 1, "err", err)
 			continue
 		}
 
 		if shouldFailover(upstreamResponse.StatusCode) && i < len(providers) - 1 {
 			upstreamResponse.Body.Close()
-			proxy.tracker.RecordFailure(provider.Name())
 			lastError = fmt.Errorf("%s returned status %d", provider.Name(), upstreamResponse.StatusCode)
-			proxy.logger.Warn("provider returned retryable status, trying next", "provider", provider.Name(), "status", upstreamResponse.StatusCode, "attempt", i + 1)
+			proxy.tracker.RecordFailure(provider.Name())
+			proxy.counters.IncProviderFailure(provider.Name())
+			logger.Warn("provider returned retryable status, trying next", "provider", provider.Name(), "status", upstreamResponse.StatusCode, "attempt", i + 1)
 			continue
 		}
 
@@ -135,6 +147,7 @@ func (proxy *Proxy) HandleChatCompletions(writer http.ResponseWriter, request *h
 
 		if upstreamResponse.StatusCode < 500 && upstreamResponse.StatusCode != http.StatusTooManyRequests {
 			proxy.tracker.RecordSuccess(provider.Name())
+			proxy.counters.IncProviderSuccess(provider.Name())
 		}
 
 
@@ -154,6 +167,7 @@ func (proxy *Proxy) HandleChatCompletions(writer http.ResponseWriter, request *h
 				tokens := parseUsageTokens(respBody)
 				if tokens > 0 {
 					proxy.limiter.Charge(key, float64(tokens))
+					proxy.counters.AddTokens(int64(tokens))
 				}
 			}
 		}
@@ -165,7 +179,7 @@ func (proxy *Proxy) HandleChatCompletions(writer http.ResponseWriter, request *h
 
 
 
-		proxy.logger.Log(request.Context(), logLevel, "proxied request",
+		logger.Log(request.Context(), logLevel, "proxied request",
 			"provider", provider.Name(),
 			"stream", streamReq.Stream,
 			"upstream_status", upstreamResponse.StatusCode,
@@ -177,7 +191,8 @@ func (proxy *Proxy) HandleChatCompletions(writer http.ResponseWriter, request *h
 		)
 		return
 	}
-	proxy.logger.Error("All providers failed", "err", lastError, "Number of providers", len(providers))
+	proxy.counters.IncAllFailed()
+	logger.Error("All providers failed", "err", lastError, "Number of providers", len(providers))
 	http.Error(writer, "All upstream providers failed", http.StatusBadGateway)
 }
 
@@ -227,6 +242,7 @@ func (proxy *Proxy) streamCopy(ctx context.Context, writer http.ResponseWriter, 
 	}
 	if tokens := parseUsageTokens(tail); tokens > 0 {
 		proxy.limiter.Charge(key, float64(tokens))
+		proxy.counters.AddTokens(int64(tokens))
 	}
 	return total, copyErr
 }

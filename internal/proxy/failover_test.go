@@ -15,7 +15,7 @@ import (
 	"github.com/James-Mustamandi/llm-api-gateway/internal/ratelimit"
 	"github.com/James-Mustamandi/llm-api-gateway/internal/secrets"
 	"github.com/James-Mustamandi/llm-api-gateway/internal/health"
-
+	"github.com/James-Mustamandi/llm-api-gateway/internal/metrics"
 )
 
 func TestFailoverToHealthyProvider(t *testing.T) {
@@ -52,8 +52,9 @@ func TestFailoverToHealthyProvider(t *testing.T) {
 	failureThresholdRetries := 5
 	trackerTimeout := 5.0 * time.Second
 	tracker := health.NewTracker(failureThresholdRetries, trackerTimeout)
+	counters := metrics.New()
 
-	proxy := New(&http.Client{Timeout: 5 * time.Second}, registry, limiter, slog.Default(), store, tracker)
+	proxy := New(&http.Client{Timeout: 5 * time.Second}, registry, limiter, slog.Default(), store, tracker, counters)
 	gateway := httptest.NewServer(http.HandlerFunc(proxy.HandleChatCompletions))
 	defer gateway.Close()
 
@@ -110,8 +111,10 @@ func TestNoFailoverOnClientError(t *testing.T) {
 	failureThresholdRetries := 5
 	trackerTimeout := 5.0 * time.Second
 	tracker := health.NewTracker(failureThresholdRetries, trackerTimeout)
+	counters := metrics.New()
 
-	proxy := New(&http.Client{Timeout: 5 * time.Second}, registry, limiter, slog.Default(), store, tracker)
+
+	proxy := New(&http.Client{Timeout: 5 * time.Second}, registry, limiter, slog.Default(), store, tracker, counters)
 	gateway := httptest.NewServer(http.HandlerFunc(proxy.HandleChatCompletions))
 	defer gateway.Close()
 
