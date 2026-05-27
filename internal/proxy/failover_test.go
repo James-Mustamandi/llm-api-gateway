@@ -42,6 +42,10 @@ func TestFailoverToHealthyProvider(t *testing.T) {
 	limiter := ratelimit.New(ratelimit.Config{Capacity: 1_000_000, RefillPerSecond: 1_000_000})
 	masterKey := os.Getenv("GATEWAY_MASTER_KEY")
 	encryptor, err := secrets.NewEncryptor(masterKey)
+	if err != nil {
+		t.Fatalf("error with master key")
+	}
+
 	store := keystore.NewMemoryStore(encryptor)
 
 	proxy := New(&http.Client{Timeout: 5 * time.Second}, registry, limiter, slog.Default(), store)
