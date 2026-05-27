@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"io"
+	"os"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -9,8 +10,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/James-Mustamandi/llm-api-gateway/internal/keystore"
 	"github.com/James-Mustamandi/llm-api-gateway/internal/provider"
 	"github.com/James-Mustamandi/llm-api-gateway/internal/ratelimit"
+	"github.com/James-Mustamandi/llm-api-gateway/internal/secrets"
+
 )
 
 func TestFailoverToHealthyProvider(t *testing.T) {
@@ -36,9 +40,11 @@ func TestFailoverToHealthyProvider(t *testing.T) {
 	)
 
 	limiter := ratelimit.New(ratelimit.Config{Capacity: 1_000_000, RefillPerSecond: 1_000_000})
+	masterKey := os.Getenv("GATEWAY_MASTER_KEY")
+	encryptor, err := secrets.NewEncryptor(masterKey)
+	store := keystore.NewMemoryStore(encryptor)
 
-
-	proxy := New(&http.Client{Timeout: 5 * time.Second}, registry, limiter, slog.Default())
+	proxy := New(&http.Client{Timeout: 5 * time.Second}, registry, limiter, slog.Default(), store)
 	gateway := httptest.NewServer(http.HandlerFunc(proxy.HandleChatCompletions))
 	defer gateway.Close()
 
@@ -87,8 +93,10 @@ func TestNoFailoverOnClientError(t *testing.T) {
 	)
 
 	limiter := ratelimit.New(ratelimit.Config{Capacity: 1_000_000, RefillPerSecond: 1_000_000})
-
-	proxy := New(&http.Client{Timeout: 5 * time.Second}, registry, limiter, slog.Default())
+	masterKey := os.Getenv("GATEWAY_MASTER_KEY")
+	encryptor, _ := secrets.NewEncryptor(masterKey)
+	store := keystore.NewMemoryStore(encryptor)
+	proxy := New(&http.Client{Timeout: 5 * time.Second}, registry, limiter, slog.Default(), store)
 	gateway := httptest.NewServer(http.HandlerFunc(proxy.HandleChatCompletions))
 	defer gateway.Close()
 

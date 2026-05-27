@@ -31,9 +31,13 @@ func (openAICompatible* OpenAICompatible) Endpoint(inboundPath string) string {
 	return openAICompatible.baseURL + path
 }
 
-func (openAICompatible *OpenAICompatible) Authorize(req *http.Request) {
-	req.Header.Set("Authorization", "Bearer "+openAICompatible.apiKey)
+func (openAICompatible *OpenAICompatible) AuthorizeWith(req *http.Request, vendorKey string) {
+	req.Header.Set("Authorization", "Bearer "+vendorKey)
 	for key, value := range openAICompatible.extraHeaders {
 		req.Header.Set(key, value)
 	}
+}
+
+func (openAICompatible *OpenAICompatible) FallbackKey() string {
+	return openAICompatible.apiKey
 }

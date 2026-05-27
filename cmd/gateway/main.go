@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -10,9 +11,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/James-Mustamandi/llm-api-gateway/internal/keystore"
 	"github.com/James-Mustamandi/llm-api-gateway/internal/provider"
 	"github.com/James-Mustamandi/llm-api-gateway/internal/proxy"
 	"github.com/James-Mustamandi/llm-api-gateway/internal/ratelimit"
+	"github.com/James-Mustamandi/llm-api-gateway/internal/secrets"
 )
 
 func main() {
@@ -52,11 +55,39 @@ func main() {
 		RefillPerSecond: 1_000_000,
 	})
 
+	masterKey := os.Getenv("GATEWAY_MASTER_KEY")
+	encryptor, err := secrets.NewEncryptor(masterKey)
+	if err != nil {
+		logger.Error("Invalid master key", "error", err)
+		os.Exit(1)
+	}
+
+	store := keystore.NewMemoryStore(encryptor)
+	if seed := os.Getenv("GATEWAY_SEED_KEYS"); seed != "" {
+		var seeded map[string]map[string]string
+		if err := json.Unmarshal([]byte(seed), &seeded); err != nil {
+			logger.Error("invalid GATEWAY_SEED_KEYS json", "err", err)
+			os.Exit(1)
+		}
+
+		for gatewayKey, providers := range seeded {
+			for providerName, vendorKey := range providers {
+				if err := store.Set(gatewayKey, providerName, vendorKey); err != nil {
+					logger.Error("seeding key failed", "gateway_key", gatewayKey, "provider", providerName, "error", err)
+					os.Exit(1)
+				}
+
+			}
+		}
+		logger.Info("seeded BYOK keys", "clients", len(seeded))
+	}
+
 	proxy := proxy.New(
 		client,
 		registry,
 		limiter,
 		logger,
+		store,
 	)
 
 	mux := http.NewServeMux()

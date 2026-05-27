@@ -12,6 +12,11 @@ type Provider interface {
 	// e.g /v1/chat/completions -> https://openarouter.ai/api/v1/chat/completions
 	Endpoint(inboundPath string) string
 
-	// Attach provider's credentials to an outbound request
-	Authorize(req *http.Request)
+	// Attaches vendor key to request using provider's auth scheme, proxy decides whcih key (per-client BYOK)
+	// provider decides how to attach it (bearer header, x-api-key, etc)
+	AuthorizeWith(req *http.Request, vendorKey string)
+
+	// default provider key
+	FallbackKey() string
+
 }

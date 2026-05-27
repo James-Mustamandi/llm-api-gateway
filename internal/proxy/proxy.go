@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/James-Mustamandi/llm-api-gateway/internal/keystore"
 	"github.com/James-Mustamandi/llm-api-gateway/internal/provider"
 	"github.com/James-Mustamandi/llm-api-gateway/internal/ratelimit"
 )
@@ -20,6 +21,7 @@ type Proxy struct {
 	registry 	*provider.Registry
 	limiter		*ratelimit.Limiter
 	logger 		*slog.Logger
+	keystore 	keystore.Store
 }
 
 
@@ -29,12 +31,13 @@ type streamRequest struct {
 
 const usageTailBytes = 8192
 
-func New(client *http.Client, registry *provider.Registry, limiter *ratelimit.Limiter, logger *slog.Logger) *Proxy {
+func New(client *http.Client, registry *provider.Registry, limiter *ratelimit.Limiter, logger *slog.Logger, keystore keystore.Store) *Proxy {
 	return &Proxy{
 		client:		client,
 		registry:	registry,
 		limiter:	limiter,	
 		logger:		logger,
+		keystore: 	keystore,
 	}
 }
 
@@ -72,12 +75,26 @@ func (proxy *Proxy) HandleChatCompletions(writer http.ResponseWriter, request *h
 	for i, provider := range providers {
 		outReq, err := http.NewRequestWithContext(request.Context(), http.MethodPost, provider.Endpoint(request.URL.Path), bytes.NewReader(body))
 		if err != nil {
-			lastError = fmt.Errorf("Building request for %s: %w", provider.Name(), err)
+			lastError = fmt.Errorf("building request for %s: %w", provider.Name(), err)
 			continue
 		}
 
+		vendorKey, err := proxy.keystore.Get(key, provider.Name())
+		if errors.Is(err, keystore.ErrorNotFound) {
+			vendorKey = provider.FallbackKey()
+		} else if err != nil {
+			proxy.logger.Warn("keystore error, using fallback", "provider", provider.Name(), "err", err)
+			vendorKey = provider.FallbackKey()
+		}
+		if vendorKey == "" {
+			lastError = fmt.Errorf("%s: no vendor key available for client", provider.Name())
+			proxy.logger.Warn("no vendor key, trying next provider", "provider", provider.Name())
+			continue
+		}
+
+
 		copyHeaders(outReq.Header, request.Header)
-		provider.Authorize(outReq)
+		provider.AuthorizeWith(outReq, vendorKey)
 		if outReq.Header.Get("Content-Type") == "" {
 			outReq.Header.Set("Content-Type", "application/json")
 		}

@@ -9,16 +9,19 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"os"
 
 	"github.com/James-Mustamandi/llm-api-gateway/internal/provider"
 	"github.com/James-Mustamandi/llm-api-gateway/internal/ratelimit"
+	"github.com/James-Mustamandi/llm-api-gateway/internal/keystore"
+	"github.com/James-Mustamandi/llm-api-gateway/internal/secrets"
 )
 
 func slowStreamUpstream(eventCount int, delay time.Duration) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		flusher := w.(http.Flusher)
-		for i := 0; i < eventCount; i++ {
+		for range eventCount {
 			select {
 			case <- r.Context().Done():
 				return
@@ -40,7 +43,15 @@ func TestStreamingDisconnect(t *testing.T) {
 
 	limiter := ratelimit.New(ratelimit.Config{Capacity: 100, RefillPerSecond: 100})
 
-	p := New(upstream.Client(), registry, limiter, slog.Default())
+	masterKey := os.Getenv("GATEWAY_MASTER_KEY")
+	encryptor, err := secrets.NewEncryptor(masterKey)
+	if err != nil {
+		t.Fatalf("invalid master key")
+	}
+
+	store := keystore.NewMemoryStore(encryptor)
+
+	p := New(upstream.Client(), registry, limiter, slog.Default(), store)
 
 	gateway := httptest.NewServer(http.HandlerFunc(p.HandleChatCompletions))
 	defer gateway.Close()
