@@ -175,15 +175,11 @@ func (proxy *Proxy) streamCopy(ctx context.Context, writer http.ResponseWriter, 
 	var copyErr error
 
 	for {
-		select {
-		case <-ctx.Done():
-			return total, ctx.Err()
-		default:
-		}
-		if copyErr != nil {
+
+		if err := ctx.Err(); err != nil {
+			copyErr = err
 			break
 		}
-
 
 		n, readErr := body.Read(buffer)
 		if n > 0 {
@@ -193,7 +189,6 @@ func (proxy *Proxy) streamCopy(ctx context.Context, writer http.ResponseWriter, 
 				return total, writeErr
 			}
 			flusher.Flush()
-
 			tail = append(tail, buffer[:n]...)
 			if len(tail) > 2 * usageTailBytes {
 				tail = tail[len(tail)-usageTailBytes:]
