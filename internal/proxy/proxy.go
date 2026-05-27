@@ -14,6 +14,7 @@ import (
 	"github.com/James-Mustamandi/llm-api-gateway/internal/keystore"
 	"github.com/James-Mustamandi/llm-api-gateway/internal/provider"
 	"github.com/James-Mustamandi/llm-api-gateway/internal/ratelimit"
+	"github.com/James-Mustamandi/llm-api-gateway/internal/health"
 )
 
 type Proxy struct {
@@ -22,6 +23,7 @@ type Proxy struct {
 	limiter		*ratelimit.Limiter
 	logger 		*slog.Logger
 	keystore 	keystore.Store
+	tracker 	*health.Tracker
 }
 
 
@@ -31,13 +33,14 @@ type streamRequest struct {
 
 const usageTailBytes = 8192
 
-func New(client *http.Client, registry *provider.Registry, limiter *ratelimit.Limiter, logger *slog.Logger, keystore keystore.Store) *Proxy {
+func New(client *http.Client, registry *provider.Registry, limiter *ratelimit.Limiter, logger *slog.Logger, keystore keystore.Store, tracker *health.Tracker) *Proxy {
 	return &Proxy{
 		client:		client,
 		registry:	registry,
 		limiter:	limiter,	
 		logger:		logger,
 		keystore: 	keystore,
+		tracker: tracker,
 	}
 }
 
@@ -73,6 +76,15 @@ func (proxy *Proxy) HandleChatCompletions(writer http.ResponseWriter, request *h
 	var lastError error
 
 	for i, provider := range providers {
+
+		// skip providers whose breaker is open
+		if !proxy.tracker.Allow(provider.Name()) {
+			proxy.logger.Info("skipping provider (circuit is open)", "provider", provider.Name())
+			lastError = fmt.Errorf("%s: circuit open", provider.Name())
+			continue
+		}
+
+
 		outReq, err := http.NewRequestWithContext(request.Context(), http.MethodPost, provider.Endpoint(request.URL.Path), bytes.NewReader(body))
 		if err != nil {
 			lastError = fmt.Errorf("building request for %s: %w", provider.Name(), err)
@@ -101,10 +113,10 @@ func (proxy *Proxy) HandleChatCompletions(writer http.ResponseWriter, request *h
 
 		upstreamResponse, err := proxy.client.Do(outReq)
 		if err != nil {
-
 			if errors.Is(err, context.Canceled) {
 				proxy.logger.Info("Client disconnected before upstream responded", "provider", provider.Name())
 			}
+			proxy.tracker.RecordFailure(provider.Name())
 			lastError = fmt.Errorf("%s request failed: %w", provider.Name(), err)
 			proxy.logger.Warn("provider failed, trying next", "provider", provider.Name(), "attempt", i + 1, "err", err)
 			continue
@@ -112,12 +124,19 @@ func (proxy *Proxy) HandleChatCompletions(writer http.ResponseWriter, request *h
 
 		if shouldFailover(upstreamResponse.StatusCode) && i < len(providers) - 1 {
 			upstreamResponse.Body.Close()
+			proxy.tracker.RecordFailure(provider.Name())
 			lastError = fmt.Errorf("%s returned status %d", provider.Name(), upstreamResponse.StatusCode)
 			proxy.logger.Warn("provider returned retryable status, trying next", "provider", provider.Name(), "status", upstreamResponse.StatusCode, "attempt", i + 1)
 			continue
 		}
 
 		defer upstreamResponse.Body.Close()
+
+
+		if upstreamResponse.StatusCode < 500 && upstreamResponse.StatusCode != http.StatusTooManyRequests {
+			proxy.tracker.RecordSuccess(provider.Name())
+		}
+
 
 		copyHeaders(writer.Header(), upstreamResponse.Header)
 		writer.Header().Set("X-Gateway-Provider", provider.Name())
@@ -143,6 +162,8 @@ func (proxy *Proxy) HandleChatCompletions(writer http.ResponseWriter, request *h
 		if err != nil {
 			logLevel = slog.LevelWarn
 		}
+
+
 
 		proxy.logger.Log(request.Context(), logLevel, "proxied request",
 			"provider", provider.Name(),

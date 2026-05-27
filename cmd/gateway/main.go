@@ -16,6 +16,8 @@ import (
 	"github.com/James-Mustamandi/llm-api-gateway/internal/proxy"
 	"github.com/James-Mustamandi/llm-api-gateway/internal/ratelimit"
 	"github.com/James-Mustamandi/llm-api-gateway/internal/secrets"
+	"github.com/James-Mustamandi/llm-api-gateway/internal/health"
+
 )
 
 func main() {
@@ -46,7 +48,6 @@ func main() {
 			"X-Title":		"llm-api-gateway",
 		},
 	)
-
 
 	registry := provider.NewRegistry(openrouter)
 
@@ -82,12 +83,17 @@ func main() {
 		logger.Info("seeded BYOK keys", "clients", len(seeded))
 	}
 
+	failureThresholdRetries := 5
+	trackerTimeout := 5.0 * time.Second
+	tracker := health.NewTracker(failureThresholdRetries, trackerTimeout)
+
 	proxy := proxy.New(
 		client,
 		registry,
 		limiter,
 		logger,
 		store,
+		tracker,
 	)
 
 	mux := http.NewServeMux()
